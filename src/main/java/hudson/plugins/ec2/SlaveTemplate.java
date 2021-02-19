@@ -308,6 +308,8 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
 
     public String currentSubnetId;
 
+    public Boolean encryptEbsRootVolume;
+
     private transient/* almost final */ Set<LabelAtom> labelSet;
 
     private transient/* almost final */Set<String> securityGroupSet;
@@ -348,6 +350,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
     @Deprecated
     public boolean connectUsingPublicIp;
 
+
     @DataBoundConstructor
     public SlaveTemplate(String ami, String zone, SpotConfiguration spotConfig, String securityGroups, String remoteFS,
                          InstanceType type, boolean ebsOptimized, String labelString, Node.Mode mode, String description, String initScript,
@@ -357,7 +360,7 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                          boolean useEphemeralDevices, boolean useDedicatedTenancy, String launchTimeoutStr, boolean associatePublicIp,
                          String customDeviceMapping, boolean connectBySSHProcess, boolean monitoring,
                          boolean t2Unlimited, ConnectionStrategy connectionStrategy, int maxTotalUses,
-                         List<? extends NodeProperty<?>> nodeProperties, HostKeyVerificationStrategyEnum hostKeyVerificationStrategy) {
+                         List<? extends NodeProperty<?>> nodeProperties, HostKeyVerificationStrategyEnum hostKeyVerificationStrategy, Boolean encryptEbsRootVolume) {
         if(StringUtils.isNotBlank(remoteAdmin) || StringUtils.isNotBlank(jvmopts) || StringUtils.isNotBlank(tmpDir)){
             LOGGER.log(Level.FINE, "As remoteAdmin, jvmopts or tmpDir is not blank, we must ensure the user has ADMINISTER rights.");
             // Can be null during tests
@@ -421,8 +424,29 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
         this.t2Unlimited = t2Unlimited;
 
         this.hostKeyVerificationStrategy = hostKeyVerificationStrategy != null ? hostKeyVerificationStrategy : HostKeyVerificationStrategyEnum.CHECK_NEW_SOFT; 
-
+        this.encryptEbsRootVolume = encryptEbsRootVolume;
         readResolve(); // initialize
+    }
+
+    @Deprecated
+    public SlaveTemplate(String ami, String zone, SpotConfiguration spotConfig, String securityGroups, String remoteFS,
+                         InstanceType type, boolean ebsOptimized, String labelString, Node.Mode mode, String description, String initScript,
+                         String tmpDir, String userData, String numExecutors, String remoteAdmin, AMITypeData amiType, String jvmopts,
+                         boolean stopOnTerminate, String subnetId, List<EC2Tag> tags, String idleTerminationMinutes, int minimumNumberOfInstances,
+                         int minimumNumberOfSpareInstances, String instanceCapStr, String iamInstanceProfile, boolean deleteRootOnTermination,
+                         boolean useEphemeralDevices, boolean useDedicatedTenancy, String launchTimeoutStr, boolean associatePublicIp,
+                         String customDeviceMapping, boolean connectBySSHProcess, boolean monitoring,
+                         boolean t2Unlimited, ConnectionStrategy connectionStrategy, int maxTotalUses,
+                         List<? extends NodeProperty<?>> nodeProperties, HostKeyVerificationStrategyEnum hostKeyVerificationStrategy) {
+        this(ami, zone, spotConfig, securityGroups, remoteFS,
+                type, ebsOptimized, labelString, mode, description, initScript,
+                tmpDir, userData, numExecutors, remoteAdmin, amiType, jvmopts,
+                stopOnTerminate, subnetId, tags, idleTerminationMinutes, minimumNumberOfInstances,
+                minimumNumberOfSpareInstances, instanceCapStr, iamInstanceProfile, deleteRootOnTermination,
+                useEphemeralDevices, useDedicatedTenancy, launchTimeoutStr, associatePublicIp,
+                customDeviceMapping, connectBySSHProcess, monitoring,
+                t2Unlimited, connectionStrategy, maxTotalUses,
+                nodeProperties, hostKeyVerificationStrategy, null);
     }
 
     @Deprecated
@@ -1175,17 +1199,24 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
     }
 
     private void setupRootDevice(Image image, List<BlockDeviceMapping> deviceMappings) {
-        if (deleteRootOnTermination && image.getRootDeviceType().equals("ebs")) {
-            // get the root device (only one expected in the blockmappings)
-            final List<BlockDeviceMapping> rootDeviceMappings = image.getBlockDeviceMappings();
-            if (rootDeviceMappings.size() == 0) {
-                LOGGER.warning("AMI missing block devices");
-                return;
-            }
-            BlockDeviceMapping rootMapping = rootDeviceMappings.get(0);
-            LOGGER.info("AMI had " + rootMapping.getDeviceName());
-            LOGGER.info(rootMapping.getEbs().toString());
+        if (!"ebs".equals(image.getRootDeviceType())) {
+            return;
+        }
 
+        // get the root device (only one expected in the blockmappings)
+        final List<BlockDeviceMapping> rootDeviceMappings = image.getBlockDeviceMappings();
+        if (rootDeviceMappings.size() == 0) {
+            LOGGER.warning("AMI missing block devices");
+            return;
+        }
+        BlockDeviceMapping rootMapping = rootDeviceMappings.get(0);
+        LOGGER.info("AMI had " + rootMapping.getDeviceName());
+        LOGGER.info(rootMapping.getEbs().toString());
+
+        // Create a shadow of the AMI mapping (doesn't like reusing rootMapping directly)
+        BlockDeviceMapping newMapping = rootMapping.clone();
+
+        if (deleteRootOnTermination) {
             // Check if the root device is already in the mapping and update it
             for (final BlockDeviceMapping mapping : deviceMappings) {
                 LOGGER.info("Request had " + mapping.getDeviceName());
@@ -1195,14 +1226,14 @@ public class SlaveTemplate implements Describable<SlaveTemplate> {
                 }
             }
 
-            // Create a shadow of the AMI mapping (doesn't like reusing rootMapping directly)
-            BlockDeviceMapping newMapping = rootMapping.clone();
+            // pass deleteRootOnTermination to shadow of the AMI mapping
             newMapping.getEbs().setDeleteOnTermination(Boolean.TRUE);
-            //Per the documentation, "If you are creating a volume from a snapshot, you can't specify an encryption value. This is because only blank volumes can be encrypted on creation. "
-            //The root volume will always have a snapshot, so this value needs to be set to null to work correctly
-            newMapping.getEbs().setEncrypted(null);
-            deviceMappings.add(0, newMapping);
         }
+
+        newMapping.getEbs().setEncrypted(encryptEbsRootVolume);
+        logProvisionInfo("EBS default encryption value set to: " + encryptEbsRootVolume);
+        deviceMappings.add(0, newMapping);
+
     }
 
     private List<BlockDeviceMapping> getNewEphemeralDeviceMapping(Image image) {
